@@ -3,25 +3,22 @@ import aiohttp
 import playwright.async_api as pw
 import os
 import hashlib
-import qrcode
 from urllib.parse import urljoin, urlparse
 from pathlib import Path
 import logging
 from datetime import datetime
-from PIL import Image
-import io
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class EnhancedArchiver:
-    def __init__(self, output_dir="archived_pages"):
+    def __init__(self, output_dir="downloaded_books"):
         self.output_dir = output_dir
         self.session = None
         self.browser = None
         self.page = None
         self.base_url = None
-
+        
     async def setup(self):
         """Initialize browser and session"""
         self.playwright = await pw.async_playwright().start()
@@ -43,105 +40,146 @@ class EnhancedArchiver:
             }
         )
 
-    def create_directory(self, url):
-        """Create unique directory for the webpage"""
+    def create_output_path(self, url):
+        """Create output directory and return PDF path"""
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
         domain = urlparse(url).netloc
         hash_str = hashlib.md5(url.encode()).hexdigest()[:8]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dir_path = Path(self.output_dir) / f"{domain}_{hash_str}_{timestamp}"
-        dir_path.mkdir(parents=True, exist_ok=True)
-        return dir_path
+        return Path(self.output_dir) / f"book_{domain}_{timestamp}.pdf"
 
-    async def handle_dynamic_text(self):
-        """Handle dynamic text box states"""
+    async def handle_dynamic_content(self):
+        """Handle both states of dynamic content in a single view"""
         try:
-            # Get all flashcards
             cards = await self.page.query_selector_all('.flashcard')
             
             for card in cards:
-                # Capture front state
-                await card.evaluate('(element) => element.classList.remove("flipped")')
-                await self.page.wait_for_timeout(500)
+                # Get the content of both states
+                front_content = await card.evaluate("""element => {
+                    const front = element.querySelector('.front .card-content');
+                    return front ? front.innerHTML : '';
+                }""")
                 
-                # Capture back state
-                await card.evaluate('(element) => element.classList.add("flipped")')
-                await self.page.wait_for_timeout(500)
+                back_content = await card.evaluate("""element => {
+                    const back = element.querySelector('.back .card-content');
+                    return back ? back.innerHTML : '';
+                }""")
+                
+                # Replace the flashcard with static content showing both states
+                await card.evaluate("""(element, {front, back}) => {
+                    const newContent = document.createElement('div');
+                    newContent.style.padding = '20px';
+                    newContent.style.margin = '20px 0';
+                    
+                    const frontDiv = document.createElement('div');
+                    frontDiv.style.padding = '15px';
+                    frontDiv.style.marginBottom = '20px';
+                    frontDiv.style.border = '2px solid #4CAF50';
+                    frontDiv.style.borderRadius = '8px';
+                    frontDiv.style.backgroundColor = '#E8F5E9';
+                    frontDiv.innerHTML = front;
+                    
+                    const backDiv = document.createElement('div');
+                    backDiv.style.padding = '15px';
+                    backDiv.style.border = '1px solid #BDBDBD';
+                    backDiv.style.borderRadius = '8px';
+                    backDiv.style.backgroundColor = '#FFFFFF';
+                    backDiv.innerHTML = back;
+                    
+                    newContent.appendChild(frontDiv);
+                    newContent.appendChild(backDiv);
+                    
+                    element.replaceWith(newContent);
+                }""", {'front': front_content, 'back': back_content})
+                
         except Exception as e:
-            logger.error(f"Error handling dynamic text: {str(e)}")
+            logger.error(f"Error handling dynamic content: {str(e)}")
 
-    async def create_video_thumbnail_with_qr(self, video_element, output_path):
-        """Create video thumbnail with QR code overlay"""
-        try:
-            # Get video source
-            src = await video_element.evaluate('element => element.querySelector("source").src')
-            
-            # Generate QR code
-            qr = qrcode.QRCode(version=1, box_size=10, border=5)
-            qr.add_data(src)
-            qr.make(fit=True)
-            qr_image = qr.make_image(fill_color="black", back_color="white")
-            
-            # Get video thumbnail
-            await video_element.screenshot(
-                path=str(output_path.parent / "temp_thumb.png")
-            )
-            
-            # Combine thumbnail and QR code
-            with Image.open(output_path.parent / "temp_thumb.png") as thumb:
-                qr_size = min(thumb.size) // 4
-                qr_resized = qr_image.resize((qr_size, qr_size))
-                thumb.paste(qr_resized, (thumb.size[0] - qr_size - 10, 10))
-                thumb.save(output_path)
-            
-            # Clean up
-            (output_path.parent / "temp_thumb.png").unlink()
-            
-        except Exception as e:
-            logger.error(f"Error creating video thumbnail: {str(e)}")
-
-    async def process_page_content(self):
-        """Process and clean up page content"""
-        # Hide UI elements
-        await self.page.evaluate("""() => {
-            const elementsToHide = [
-                '.toolbar',
-                '.fixed.left-0',
-                '.fixed.right-0'
-            ];
-            elementsToHide.forEach(selector => {
-                const element = document.querySelector(selector);
-                if (element) element.style.display = 'none';
-            });
-        }""")
-        
-        # Handle videos
+    async def process_videos(self):
+        """Process videos to make them clickable in PDF"""
         videos = await self.page.query_selector_all('video')
-        for idx, video in enumerate(videos):
+        for video in videos:
             try:
-                thumbnail_path = self.base_dir / f'video_thumbnail_{idx}.png'
-                await self.create_video_thumbnail_with_qr(video, thumbnail_path)
+                # Get video source URL
+                video_src = await video.evaluate("""element => {
+                    const source = element.querySelector('source');
+                    return source ? source.src : '';
+                }""")
                 
-                # Replace video with thumbnail
-                await video.evaluate(f"""(element) => {{
-                    const img = document.createElement('img');
-                    img.src = "{str(thumbnail_path)}";
-                    img.style.width = '100%';
-                    img.style.height = 'auto';
-                    element.parentNode.replaceChild(img, element);
-                }}""")
+                # Create a clickable thumbnail
+                await video.evaluate("""(element, videoUrl) => {
+                    const container = document.createElement('div');
+                    container.style.position = 'relative';
+                    container.style.width = '100%';
+                    container.style.maxWidth = '400px';
+                    container.style.margin = '20px auto';
+                    
+                    const link = document.createElement('a');
+                    link.href = videoUrl;
+                    link.target = '_blank';
+                    
+                    const thumbnail = document.createElement('div');
+                    thumbnail.style.position = 'relative';
+                    thumbnail.style.width = '100%';
+                    thumbnail.style.paddingBottom = '56.25%';  // 16:9 aspect ratio
+                    thumbnail.style.backgroundColor = '#000';
+                    thumbnail.style.borderRadius = '8px';
+                    thumbnail.style.overflow = 'hidden';
+                    
+                    const playButton = document.createElement('div');
+                    playButton.innerHTML = '▶';
+                    playButton.style.position = 'absolute';
+                    playButton.style.top = '50%';
+                    playButton.style.left = '50%';
+                    playButton.style.transform = 'translate(-50%, -50%)';
+                    playButton.style.fontSize = '48px';
+                    playButton.style.color = '#FFF';
+                    
+                    const text = document.createElement('div');
+                    text.textContent = 'Click to play video';
+                    text.style.textAlign = 'center';
+                    text.style.marginTop = '10px';
+                    text.style.color = '#1a73e8';
+                    text.style.textDecoration = 'underline';
+                    
+                    thumbnail.appendChild(playButton);
+                    link.appendChild(thumbnail);
+                    container.appendChild(link);
+                    container.appendChild(text);
+                    
+                    element.parentNode.replaceWith(container);
+                }""", video_src)
                 
             except Exception as e:
-                logger.error(f"Error processing video {idx}: {str(e)}")
+                logger.error(f"Error processing video: {str(e)}")
 
-        # Handle dynamic text
-        await self.handle_dynamic_text()
-        await self.page.wait_for_timeout(1000)  # Wait for any transitions
+    async def cleanup_page(self):
+        """Remove UI elements and prepare page for PDF"""
+        await self.page.evaluate("""() => {
+            const elementsToRemove = [
+                '.toolbar',
+                '.fixed.left-0',
+                '.fixed.right-0',
+                '.rounded-full.border.w-6.h-6'  // Page numbers
+            ];
+            
+            elementsToRemove.forEach(selector => {
+                document.querySelectorAll(selector).forEach(el => el.remove());
+            });
+            
+            // Adjust main content
+            const content = document.querySelector('.flex.flex-col.items-center.mt-20');
+            if (content) {
+                content.style.margin = '0';
+                content.style.padding = '20px';
+            }
+        }""")
 
     async def archive_webpage(self, url):
         """Main method to archive a webpage"""
         try:
             await self.setup()
-            self.base_dir = self.create_directory(url)
+            output_path = self.create_output_path(url)
             self.base_url = url
             
             self.page = await self.context.new_page()
@@ -152,19 +190,21 @@ class EnhancedArchiver:
             await self.page.goto(url, wait_until='networkidle')
             await self.page.wait_for_timeout(2000)
             
-            await self.process_page_content()
+            logger.info("Processing page content...")
+            await self.cleanup_page()
+            await self.handle_dynamic_content()
+            await self.process_videos()
             
-            pdf_path = self.base_dir / 'book.pdf'
+            logger.info("Generating PDF...")
             await self.page.pdf(
-                path=str(pdf_path),
-                print_background=True,
+                path=str(output_path),
                 format='A4',
-                margin={'top': '0', 'bottom': '0', 'left': '0', 'right': '0'},
-                scale=1,
-                prefer_css_page_size=True
+                print_background=True,
+                margin={'top': '20px', 'right': '20px', 'bottom': '20px', 'left': '20px'},
+                scale=0.95  # Slight scale down to ensure content fits
             )
             
-            logger.info(f"Successfully archived webpage to {self.base_dir}")
+            logger.info(f"Successfully saved book to: {output_path}")
             
         except Exception as e:
             logger.error(f"Error archiving webpage: {str(e)}")
@@ -183,7 +223,7 @@ class EnhancedArchiver:
 
 async def main():
     archiver = EnhancedArchiver()
-    url = "https://yourepub.com/ebooks/27"
+    url = "https://yourepub.com/ebooks/48" 
     await archiver.archive_webpage(url)
 
 if __name__ == "__main__":
