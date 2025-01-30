@@ -49,54 +49,84 @@ class EnhancedArchiver:
         return Path(self.output_dir) / f"book_{domain}_{timestamp}.pdf"
 
     async def handle_dynamic_content(self):
-        """Handle both states of dynamic content in a single view"""
+        """Handle both states of dynamic content while preserving exact original styling"""
         try:
             cards = await self.page.query_selector_all('.flashcard')
             
             for card in cards:
-                # Get the content of both states
-                front_content = await card.evaluate("""element => {
-                    const front = element.querySelector('.front .card-content');
-                    return front ? front.innerHTML : '';
+                # Extract exact styles and content
+                card_data = await card.evaluate("""element => {
+                    // Helper to get computed styles
+                    const getStyles = (el) => {
+                        const computed = window.getComputedStyle(el);
+                        let styles = {};
+                        for (let i = 0; i < computed.length; i++) {
+                            const prop = computed[i];
+                            styles[prop] = computed.getPropertyValue(prop);
+                        }
+                        return styles;
+                    };
+                    
+                    // Get all necessary elements
+                    const frontContent = element.querySelector('.front .card-content');
+                    const backContent = element.querySelector('.back .card-content');
+                    const frontCard = element.querySelector('.front');
+                    const backCard = element.querySelector('.back');
+                    
+                    return {
+                        frontStyles: getStyles(frontCard),
+                        backStyles: getStyles(backCard),
+                        frontContentStyles: getStyles(frontContent),
+                        backContentStyles: getStyles(backContent),
+                        frontHTML: frontContent.innerHTML,
+                        backHTML: backContent.innerHTML,
+                        originalWidth: element.offsetWidth + 'px'
+                    };
                 }""")
                 
-                back_content = await card.evaluate("""element => {
-                    const back = element.querySelector('.back .card-content');
-                    return back ? back.innerHTML : '';
-                }""")
-                
-                # Replace the flashcard with static content showing both states
-                await card.evaluate("""(element, {front, back}) => {
-                    const newContent = document.createElement('div');
-                    newContent.style.padding = '20px';
-                    newContent.style.margin = '20px 0';
+                # Create sequential cards with exact styling
+                await card.evaluate("""(element, data) => {
+                    const container = document.createElement('div');
+                    container.style.display = 'flex';
+                    container.style.flexDirection = 'column';
+                    container.style.width = data.originalWidth;
+                    container.style.margin = '0 auto';
+                    container.style.gap = '20px';
                     
-                    const frontDiv = document.createElement('div');
-                    frontDiv.style.padding = '15px';
-                    frontDiv.style.marginBottom = '20px';
-                    frontDiv.style.border = '2px solid #4CAF50';
-                    frontDiv.style.borderRadius = '8px';
-                    frontDiv.style.backgroundColor = '#E8F5E9';
-                    frontDiv.innerHTML = front;
+                    // Front card (green)
+                    const frontCard = document.createElement('div');
+                    const frontContent = document.createElement('div');
+                    Object.assign(frontCard.style, data.frontStyles);
+                    Object.assign(frontContent.style, data.frontContentStyles);
+                    frontContent.innerHTML = data.frontHTML;
+                    frontCard.appendChild(frontContent);
+                    container.appendChild(frontCard);
                     
-                    const backDiv = document.createElement('div');
-                    backDiv.style.padding = '15px';
-                    backDiv.style.border = '1px solid #BDBDBD';
-                    backDiv.style.borderRadius = '8px';
-                    backDiv.style.backgroundColor = '#FFFFFF';
-                    backDiv.innerHTML = back;
+                    // Back card (white)
+                    const backCard = document.createElement('div');
+                    const backContent = document.createElement('div');
+                    Object.assign(backCard.style, data.backStyles);
+                    Object.assign(backContent.style, data.backContentStyles);
+                    backContent.innerHTML = data.backHTML;
+                    backCard.appendChild(backContent);
+                    container.appendChild(backCard);
                     
-                    newContent.appendChild(frontDiv);
-                    newContent.appendChild(backDiv);
+                    // Force vertical layout and proper width
+                    frontCard.style.width = '100%';
+                    backCard.style.width = '100%';
+                    frontCard.style.position = 'relative';
+                    backCard.style.position = 'relative';
+                    frontCard.style.display = 'block';
+                    backCard.style.display = 'block';
                     
-                    element.replaceWith(newContent);
-                }""", {'front': front_content, 'back': back_content})
+                    element.replaceWith(container);
+                }""", card_data)
                 
         except Exception as e:
             logger.error(f"Error handling dynamic content: {str(e)}")
 
     async def process_videos(self):
-        """Process videos to make them clickable in PDF"""
+        """Process videos to make them clickable in PDF with direct links"""
         videos = await self.page.query_selector_all('video')
         for video in videos:
             try:
@@ -106,7 +136,7 @@ class EnhancedArchiver:
                     return source ? source.src : '';
                 }""")
                 
-                # Create a clickable thumbnail
+                # Create a clickable thumbnail with direct link
                 await video.evaluate("""(element, videoUrl) => {
                     const container = document.createElement('div');
                     container.style.position = 'relative';
@@ -115,8 +145,10 @@ class EnhancedArchiver:
                     container.style.margin = '20px auto';
                     
                     const link = document.createElement('a');
+                    // Use direct link - this is key for PDF clickability
                     link.href = videoUrl;
-                    link.target = '_blank';
+                    link.style.display = 'block';
+                    link.style.textDecoration = 'none';
                     
                     const thumbnail = document.createElement('div');
                     thumbnail.style.position = 'relative';
@@ -125,6 +157,7 @@ class EnhancedArchiver:
                     thumbnail.style.backgroundColor = '#000';
                     thumbnail.style.borderRadius = '8px';
                     thumbnail.style.overflow = 'hidden';
+                    thumbnail.style.cursor = 'pointer';
                     
                     const playButton = document.createElement('div');
                     playButton.innerHTML = '▶';
@@ -135,8 +168,10 @@ class EnhancedArchiver:
                     playButton.style.fontSize = '48px';
                     playButton.style.color = '#FFF';
                     
-                    const text = document.createElement('div');
-                    text.textContent = 'Click to play video';
+                    // Optional text beneath the thumbnail
+                    const text = document.createElement('div');  
+                    text.textContent = 'Click here to watch the video';
+                    text.style.display = 'block';
                     text.style.textAlign = 'center';
                     text.style.marginTop = '10px';
                     text.style.color = '#1a73e8';
@@ -152,6 +187,8 @@ class EnhancedArchiver:
                 
             except Exception as e:
                 logger.error(f"Error processing video: {str(e)}")
+
+
 
     async def cleanup_page(self):
         """Remove UI elements and prepare page for PDF"""
@@ -201,7 +238,9 @@ class EnhancedArchiver:
                 format='A4',
                 print_background=True,
                 margin={'top': '20px', 'right': '20px', 'bottom': '20px', 'left': '20px'},
-                scale=0.95  # Slight scale down to ensure content fits
+                scale=0.95,
+                prefer_css_page_size=True,
+                display_header_footer=False
             )
             
             logger.info(f"Successfully saved book to: {output_path}")
@@ -223,7 +262,7 @@ class EnhancedArchiver:
 
 async def main():
     archiver = EnhancedArchiver()
-    url = "https://yourepub.com/ebooks/48" 
+    url = "https://yourepub.com/ebooks/48"  # Replace with your URL
     await archiver.archive_webpage(url)
 
 if __name__ == "__main__":
